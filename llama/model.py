@@ -9,6 +9,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+# Meta에서 만든 병렬처리를 해주는 라이브러리
 import fairscale.nn.model_parallel.initialize as fs_init
 from fairscale.nn.model_parallel.layers import (
     ParallelEmbedding,
@@ -17,6 +18,8 @@ from fairscale.nn.model_parallel.layers import (
 )
 
 
+# =========================================
+# Model Arguments Setting
 @dataclass
 class ModelArgs:
     dim: int = 512
@@ -28,6 +31,7 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
+# =========================================
 
 
 class RMSNorm(torch.nn.Module):
@@ -60,6 +64,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     return freqs_cis.view(*shape)
 
 
+# RoPE
 def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
@@ -190,7 +195,11 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+        # attention에 들어가기 전 Norm -> Pre-normalization
+        # attention에 x 더해준 건 Add term (residual) 구현
         h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
+
+        # 마찬가지로 h 더해준 건 output에 잔차 Add term
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -210,6 +219,7 @@ class Transformer(nn.Module):
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
+        # LLaMA의 핵심(?)
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = ColumnParallelLinear(
             params.dim, params.vocab_size, bias=False, init_method=lambda x: x
@@ -221,7 +231,7 @@ class Transformer(nn.Module):
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int):
-        _bsz, seqlen = tokens.shape
+        _bsz, seqlen = tokens.shape     # shape = (batch_size, sequence_length)
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
